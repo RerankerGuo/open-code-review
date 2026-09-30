@@ -297,3 +297,43 @@ func TestFileReadDiffProvider_Execute_ByteBackstopCutsBetweenLines(t *testing.T)
 		t.Errorf("content is %d bytes, over the %d-byte budget", len(content), fileReadDiffMaxBytes)
 	}
 }
+
+func TestFileReadDiffProvider_Execute_OversizedLineAfterFullPageKeepsPage(t *testing.T) {
+	// The oversized-line check must not run before the page boundary: the
+	// oversized line sits at offset 2, outside the requested two-line page,
+	// and erroring on it would discard the collected page and its
+	// continuation offset. The caller re-requests at NEXT_OFFSET and meets
+	// the oversized-line error there, where that line is really the next
+	// requested content.
+	diff := "normal line\n" + strings.Repeat("x", fileReadDiffMaxBytes+1)
+	p := NewFileReadDiff(NewDiffMap(map[string]string{"a.go": diff}))
+
+	got, err := p.Execute(context.Background(), map[string]any{
+		"path_array": []any{"a.go"},
+		"offset":     float64(0),
+		"max_lines":  float64(2),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasPrefix(got, "IS_TRUNCATED: true\nNEXT_OFFSET: 2\n") {
+		t.Errorf("full page was not preserved with a continuation offset: %q", got[:80])
+	}
+	content := strings.SplitN(got, "\n", 3)[2]
+	if n := strings.Count(content, "\n"); n != 2 {
+		t.Errorf("carried %d lines, want 2 (file header + normal line)", n)
+	}
+	if !strings.Contains(content, "normal line") {
+		t.Errorf("collected page content was discarded: %q", content)
+	}
+
+	// The next request lands on the oversized line itself: there the error is
+	// expected, because that line is now the next requested content.
+	if _, err := p.Execute(context.Background(), map[string]any{
+		"path_array": []any{"a.go"},
+		"offset":     float64(2),
+		"max_lines":  float64(2),
+	}); err == nil || !strings.Contains(err.Error(), "per-call limit") {
+		t.Errorf("err = %v, want a per-call byte limit error at the oversized line", err)
+	}
+}

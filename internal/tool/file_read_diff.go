@@ -117,10 +117,19 @@ func (p *FileReadDiffProvider) Execute(_ context.Context, args map[string]any) (
 		line := full[pos : pos+nl]
 
 		if lineIdx >= offset {
+			// Stop at the requested page boundary before the next line is
+			// validated: a line beyond the page belongs to a later request,
+			// and failing on it here would discard the collected prefix.
+			if emitted >= maxLines {
+				break
+			}
+			// The next requested line cannot be emitted at all, so the
+			// oversized-line error is only surfaced for content the caller
+			// actually asked for.
 			if len(line)+1 > fileReadDiffMaxBytes {
 				return "", fmt.Errorf("the diff line at offset %d is %d bytes, over the %d-byte per-call limit; request fewer paths or read that file with file_read", lineIdx, len(line), fileReadDiffMaxBytes)
 			}
-			if emitted >= maxLines || size+len(line)+1 > fileReadDiffMaxBytes {
+			if size+len(line)+1 > fileReadDiffMaxBytes {
 				break
 			}
 			for blockIdx+1 < len(blocks) && lineIdx >= blocks[blockIdx+1].startLine {
