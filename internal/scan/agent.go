@@ -107,7 +107,7 @@ type Agent struct {
 	resumeInfo       *session.ResumeInfo
 	scanFingerprints map[string]string
 	projectSummary   string      // populated post-run by maybeRunProjectSummary
-	budgetExceeded   atomic.Bool // set when a token/tool-call budget gate stopped dispatch or an in-flight stop fired
+	budgetExceeded   atomic.Bool // set when the aggregate token budget stops dispatch or an in-flight task
 }
 
 // ProjectSummary returns the markdown project-level summary produced after

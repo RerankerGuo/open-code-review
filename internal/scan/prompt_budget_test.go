@@ -167,12 +167,11 @@ func TestRun_PromptOverflowRecordsFailure(t *testing.T) {
 // after a token-budget stop fired and the stderr "budget_exceeded=..."
 // line lies too, masking the partial stop from CI consumers.
 //
-// The fake client returns an empty content (no tool calls) on every call, so
-// the main loop retries instead of completing. Per-call tokens (20K) exceed
-// the budget (15K) on the first response, so the second round's pre-flight
-// check trips StopTokenBudget. The dispatch look-ahead cannot catch this
-// because estimateFileTokens treats per-round cost as fixed overhead
-// (2000) plus the file body, well under 15K for a one-line file.
+// The fake client returns no tool calls, so the main loop retries rather
+// than completing. Its first response consumes 26K tokens, exceeding the
+// 25K budget; the next round's pre-flight check trips StopTokenBudget.
+// The dispatch look-ahead admits the file because its estimated total
+// cost is about 19K tokens, below the 25K budget.
 func TestRun_TokenBudgetStopSurfacesAsBudgetExceeded(t *testing.T) {
 	perCall := int64(26_000)
 	budget := int64(25_000) // > per-file estimate (~19K) so the look-ahead admits the file
