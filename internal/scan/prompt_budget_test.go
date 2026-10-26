@@ -155,20 +155,22 @@ func TestRun_PromptOverflowRecordsFailure(t *testing.T) {
 	}
 }
 
-// TestRun_PromptOverflowSkipsDoomedPlanRequest verifies the plan phase gets
-// the same local pre-flight token gate as MAIN_TASK: a plan prompt that
-// already exceeds the limit is rejected locally instead of burning a doomed
-// provider request before the main-task guard rejects the file.
-func TestRun_PromptOverflowSkipsDoomedPlanRequest(t *testing.T) {
+// TestRun_OversizedPlanPromptFailsFile verifies the plan-phase token gate is
+// an explicit per-file error, not a silent plan-less fallback: an oversized
+// PLAN prompt is rejected locally before any provider request, the file is
+// marked failed with a message pointing at --max-tokens / --no-plan, and the
+// MAIN_TASK gate still rejects files whose main prompt alone overflows.
+func TestRun_OversizedPlanPromptFailsFile(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		planWords   int
-		mainWords   int
-		wantCalls   int64
-		wantFailure bool
+		name             string
+		planWords        int
+		mainWords        int
+		wantCalls        int64
+		wantPlanOverflow bool
 	}{
-		{name: "plan overflows, main fits: plan skipped, file still reviewed", planWords: 100, mainWords: 5, wantCalls: 1},
-		{name: "plan and main overflow: zero provider requests", planWords: 100, mainWords: 100, wantCalls: 0, wantFailure: true},
+		{name: "plan overflows, main fits: file fails with zero provider requests", planWords: 100, mainWords: 5, wantCalls: 0, wantPlanOverflow: true},
+		{name: "plan and main overflow: plan gate rejects first", planWords: 100, mainWords: 100, wantCalls: 0, wantPlanOverflow: true},
+		{name: "plan fits, main overflows: main gate still rejects after plan ran", planWords: 5, mainWords: 100, wantCalls: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := initTestRepo(t)
@@ -197,24 +199,60 @@ func TestRun_PromptOverflowSkipsDoomedPlanRequest(t *testing.T) {
 				Session:        session.New(repo, "main", "test", session.SessionOptions{ReviewMode: session.ReviewModeFullScan}),
 			})
 			_, err := a.Run(context.Background())
-			if tc.wantFailure && (err == nil || !strings.Contains(err.Error(), "all 1 file scan(s) failed")) {
+			if err == nil || !strings.Contains(err.Error(), "all 1 file scan(s) failed") {
 				t.Fatalf("expected all-files-failed error, got %v", err)
-			}
-			if !tc.wantFailure && err != nil {
-				t.Fatalf("skipping an oversized plan must not fail the file: %v", err)
 			}
 			if calls := atomic.LoadInt64(&client.calls); calls != tc.wantCalls {
 				t.Fatalf("MAIN_TASK/PLAN calls = %d, want %d (a doomed plan request must not be sent)", calls, tc.wantCalls)
 			}
 			var foundWarning bool
 			for _, warning := range a.Warnings() {
-				if warning.Type == "token_threshold_exceeded" && warning.File == "overflow.go" && strings.Contains(warning.Message, "plan prompt tokens") {
+				if warning.Type != "scan_subtask_error" || warning.File != "overflow.go" {
+					continue
+				}
+				if tc.wantPlanOverflow {
+					if strings.Contains(warning.Message, "plan prompt tokens") && strings.Contains(warning.Message, "--no-plan") {
+						foundWarning = true
+					}
+				} else if strings.Contains(warning.Message, "prompt tokens") && !strings.Contains(warning.Message, "plan prompt tokens") {
 					foundWarning = true
 				}
 			}
-		if !foundWarning {
-			t.Fatalf("missing plan-overflow warning: %+v", a.Warnings())
-		}
+			if !foundWarning {
+				t.Fatalf("missing prompt-overflow failure warning: %+v", a.Warnings())
+			}
+			path, err := session.SessionFilePath(repo, a.SessionID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var foundFailure bool
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				var record struct {
+					Type     string `json:"type"`
+					FilePath string `json:"filePath"`
+					Error    string `json:"error"`
+				}
+				if err := json.Unmarshal([]byte(line), &record); err != nil {
+					t.Fatal(err)
+				}
+				if record.Type != "review_item_failed" || record.FilePath != "overflow.go" {
+					continue
+				}
+				if tc.wantPlanOverflow {
+					if strings.Contains(record.Error, "plan prompt tokens") && strings.Contains(record.Error, "--no-plan") {
+						foundFailure = true
+					}
+				} else if strings.Contains(record.Error, "prompt tokens") && !strings.Contains(record.Error, "plan prompt tokens") {
+					foundFailure = true
+				}
+			}
+			if !foundFailure {
+				t.Fatal("session omitted the plan-overflow failure record")
+			}
 		})
 	}
 }
